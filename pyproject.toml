@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "project-analyzer"
+version = "0.1.0"
+description = "Python project analyzer with FastAPI API"
+authors = ["Maksim Tishchenko <tmaxim.1997@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [{ include = "app" }]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+fastapi = "^0.115.0"
+uvicorn = "^0.32.0"
+pydantic = "^2.9.0"
+
+[tool.poetry.group.dev.dependencies]
+black = "^24.0.0"
+isort = "^5.13.0"
+pytest = "^8.0.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
