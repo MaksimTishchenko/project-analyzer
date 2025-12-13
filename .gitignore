@@ -1,23 +1,98 @@
-# Virtual envs
-.venv/
-env/
-venv/
+# ===== OS / Editor =====
 
-# Python cache
-__pycache__/
-*.pyc
+.DS_Store
+Thumbs.db
 
-# Poetry
-poetry.lock
-.poetry/
+# PyCharm / IntelliJ
 
-# IDE
 .idea/
+*.iml
+
+# VS Code
+
 .vscode/
 
-# Test caches
+# ===== Python =====
+
+**pycache**/
+*.py[cod]
+*$py.class
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.pytype/
+.pyre/
+.pyc
 
-# System
-.DS_Store
+# ===== Virtualenv =====
+
+.venv/
+venv/
+ENV/
+env/
+
+# ===== Packaging / Build =====
+
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# ===== Test / Coverage =====
+
+.coverage
+coverage.xml
+htmlcov/
+.nox/
+.tox/
+.cache/
+pytestdebug.log
+
+# ===== Logs =====
+
+*.log
+logs/
+log/
+
+# ===== Env / Secrets =====
+
+.env
+.env.*
+!.env.example
+
+# ===== Local runtime artifacts =====
+
+# PlantUML / Mermaid generated outputs
+
+*.puml
+*.mmd
+*.svg
+*.png
+*.pdf
+
+# If you want to keep example diagrams in repo, comment lines above and instead ignore only:
+
+# diagram_full.puml
+
+# diagram_small.puml
+
+# ===== GitHub fetcher workspace / clones (adjust to your real folder name if needed) =====
+
+# Common names for cloned repos / cache folders
+
+repos/
+repo_cache/
+repo-workspace/
+workspace/
+tmp/
+temp/
+
+# ===== Jupyter (if ever used) =====
+
+.ipynb_checkpoints/
+
+# ===== Node (if ever used) =====
+
+node_modules/

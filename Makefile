@@ -10,6 +10,7 @@ install:
 run:
 	$(POETRY) run uvicorn main:app --reload
 
+
 test:
 	$(POETRY) run pytest
 
