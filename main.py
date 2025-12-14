@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-from app.service import analyze_github_project, analyze_local_project
 from app.github_fetcher import (
     CloneFailed,
     GitHubFetcherError,
@@ -14,6 +14,7 @@ from app.github_fetcher import (
     GitNotInstalled,
     InvalidRepoUrl,
 )
+from app.service import analyze_github_project, analyze_local_project
 from app.settings import settings
 
 app = FastAPI(title="Python Project Analyzer", version="0.1.0")
@@ -51,17 +52,40 @@ class AnalyzeGitHubRequest(BaseModel):
 
 
 def _validate_local_path(raw_path: str) -> Path:
+    """
+    Security gate for local filesystem access:
+    - reject empty path (422)
+    - resolve path (expands ~, resolves .. and symlinks)
+    - must exist and be a directory
+    - if ANALYSIS_ROOT is set -> must be inside it (403)
+    - basic read permission check
+    """
     raw = (raw_path or "").strip()
     if not raw:
-        raise HTTPException(status_code=400, detail="path is required")
+        raise HTTPException(status_code=422, detail="path is required")
 
-    p = Path(raw)
-
-    if not p.exists():
-        raise HTTPException(status_code=404, detail=f"Path not found: {raw}")
+    try:
+        p = Path(raw).expanduser().resolve(strict=True)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=f"Path not found: {raw}") from e
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid path: {raw}") from e
 
     if not p.is_dir():
-        raise HTTPException(status_code=400, detail=f"Path is not a directory: {raw}")
+        raise HTTPException(status_code=400, detail=f"Path is not a directory: {p}")
+
+    if settings.analysis_root is not None:
+        ar = settings.analysis_root.expanduser().resolve()
+        try:
+            p.relative_to(ar)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Path '{p}' is outside ANALYSIS_ROOT='{ar}'",
+            ) from e
+
+    if not os.access(p, os.R_OK):
+        raise HTTPException(status_code=403, detail=f"Permission denied: {p}")
 
     return p
 
@@ -108,6 +132,25 @@ def _diagram_response(fmt: str, text: str) -> PlainTextResponse:
     return PlainTextResponse(text, media_type=media_type, headers=headers)
 
 
+def _map_local_errors(e: Exception) -> HTTPException:
+    """
+    Normalize common local-analysis errors into correct HTTP codes.
+    This makes API behavior stable even if deeper layers raise ValueError.
+    """
+    msg = str(e) or e.__class__.__name__
+    msg_l = msg.lower()
+
+    # keep contract consistent with tests
+    if "path is required" in msg_l:
+        return HTTPException(status_code=422, detail="path is required")
+
+    # defense-in-depth sandbox gate from service.py
+    if "outside analysis_root" in msg_l:
+        return HTTPException(status_code=403, detail=msg)
+
+    return HTTPException(status_code=400, detail=msg)
+
+
 @app.post("/analyze/local")
 async def analyze_local(request: AnalyzeLocalRequest):
     p = _validate_local_path(request.path)
@@ -122,9 +165,9 @@ async def analyze_local(request: AnalyzeLocalRequest):
             diagram_max_classes=request.diagram_max_classes,
         )
     except PermissionError as e:
-        raise HTTPException(status_code=400, detail=f"Permission denied: {e}") from e
+        raise HTTPException(status_code=403, detail=f"Permission denied: {e}") from e
     except (ValueError, OSError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise _map_local_errors(e) from e
 
 
 @app.post("/analyze/local/diagram", response_class=PlainTextResponse)
@@ -141,9 +184,9 @@ async def analyze_local_diagram(request: AnalyzeLocalRequest):
             diagram_max_classes=request.diagram_max_classes,
         )
     except PermissionError as e:
-        raise HTTPException(status_code=400, detail=f"Permission denied: {e}") from e
+        raise HTTPException(status_code=403, detail=f"Permission denied: {e}") from e
     except (ValueError, OSError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise _map_local_errors(e) from e
 
     fmt, text = _extract_diagram(result, request.diagram_format)
     return _diagram_response(fmt, text)
