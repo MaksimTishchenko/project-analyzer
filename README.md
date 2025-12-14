@@ -1,62 +1,129 @@
 # Project Analyzer (Python)
 
-Сервис, который анализирует Python-проект и возвращает:
+Сервис, который **статически анализирует Python-проект** и возвращает:
 
-* структуру проекта (модули → классы → методы, функции, импорты),
-* стек технологий (по импортам и dependency-файлам),
-* диаграмму классов в формате **PlantUML** или **Mermaid**,
-* удобный REST API для локальных проектов и (опционально) GitHub-репозиториев.
-
-## Возможности
-
-### Анализ локального проекта
-
-* Рекурсивное сканирование (с игнорированием служебных папок и мусора).
-* AST-парсинг Python-кода.
-* Генерация диаграммы классов (PlantUML/Mermaid).
-* “Top-N” диаграмма через `diagram_max_classes`, чтобы не получить “ковёр” на больших кодовых базах.
-
-### Анализ GitHub (опционально)
-
-* Эндпоинт `/analyze/github` и `/analyze/github/diagram`.
-* Клонирование может быть выключено флагом (безопасный режим демо).
+* структуру проекта: `модули → классы → методы`, функции, импорты,
+* **tech stack** (по импортам и dependency-файлам),
+* **диаграмму классов** в формате **PlantUML** или **Mermaid**,
+* REST API на **FastAPI** для анализа **локальных проектов** и (опционально) **GitHub** репозиториев.
 
 ---
 
-## Требования
+## Что уже сделано (по проекту)
 
-* Python 3.10+ (рекомендуется 3.11+)
+### 1) Сканирование файлов (FileScanner)
+
+* Рекурсивный обход проекта.
+* Игнор “мусорных” директорий (`.git`, `__pycache__`, `.venv`, `node_modules`, `.idea`, и т.п.).
+* Опциональная поддержка **.gitignore** (через `pathspec`, если установлен; иначе — fallback).
+* Пропуск:
+
+  * явных бинарных расширений (`.png`, `.zip`, `.exe`, `.pdf`, …),
+  * симлинков (по умолчанию),
+  * слишком больших файлов (лимит в конфиге).
+* На выходе: список `.py` + обнаруженные dependency-файлы (`requirements.txt`, `pyproject.toml`, `setup.cfg`) + статистика.
+
+### 2) AST-парсер (CodeParser)
+
+* Парсит `.py` через `ast`.
+* Достаёт:
+
+  * классы, базовые классы (наследование),
+  * методы (включая декораторы и `lineno`),
+  * top-level функции (включая `async`),
+  * импорты,
+  * атрибуты (включая `self.x = ...`) + простые композиции/агрегации по эвристикам.
+
+### 3) TechStackAnalyzer
+
+* Собирает зависимости из:
+
+  * импортов (из AST),
+  * `requirements.txt`,
+  * `pyproject.toml` (Poetry deps / groups).
+* Выдаёт структурированный JSON: пакеты, категории, “сигналы”, оценка типа проекта (web/ml/cli/scientific).
+
+### 4) DiagramGenerator
+
+* Генерирует диаграмму классов:
+
+  * PlantUML **или** Mermaid
+  * наследование,
+  * композиция/агрегация (если извлечено).
+* Поддерживает **Top-N** классов через `diagram_max_classes`, чтобы не получить “ковёр” на больших репозиториях.
+
+### 5) FastAPI слой
+
+* `GET /health`
+* `POST /analyze/local` и `POST /analyze/local/diagram`
+* `POST /analyze/github` и `POST /analyze/github/diagram` (клонирование по умолчанию выключено настройками)
+
+---
+
+## Требования (локальный запуск без Docker)
+
+* Python **3.12** (проект в Poetry заявлен на 3.12)
 * Poetry
 
-Для предпросмотра PlantUML в IDE:
-
-* PyCharm + плагин **PlantUML Integration**
-* Java (JDK 17+ рекомендуется)
-* Graphviz (опционально, но полезно)
-
----
-
-## Установка
+Установка:
 
 ```bash
 poetry install
 ```
 
----
-
-## Запуск API
+Запуск API:
 
 ```bash
 poetry run uvicorn main:app --reload --port 8081
 ```
 
-Документация Swagger:
+Swagger:
 
-* `http://127.0.0.1:8081/docs`
+* [http://127.0.0.1:8081/docs](http://127.0.0.1:8081/docs)
+
+Тесты:
+
+```bash
+poetry run pytest
+```
 
 ---
 
-## Эндпоинты
+## Docker (рекомендуемый способ)
+
+### 1) Запуск через Docker Compose
+
+```bash
+docker compose up --build
+```
+
+После старта API будет доступен на порту, который проброшен в `docker-compose.yml`
+(часто это `http://127.0.0.1:8000` или `http://127.0.0.1:8081` — смотри compose).
+
+### Важно про пути внутри контейнера (твоя ситуация с пустым `/workspace`)
+
+Если ты вызываешь `/analyze/local` с `path="/workspace"`, но **не примонтировал туда код**, FileScanner реально увидит “пустую” папку → `python_files: []`.
+
+Правильная схема:
+
+* примонтировать свой проект в контейнер, например в `/workspace`,
+* в запросе указывать **путь внутри контейнера**, например `/workspace/mini_project` или `/workspace`.
+
+Пример (если в `docker-compose.yml` сделано что-то вроде):
+
+```yaml
+volumes:
+  - ./:/workspace
+```
+
+Тогда запросы должны выглядеть так:
+
+* `path: "/workspace"` — чтобы анализировать **весь** примонтированный репозиторий
+* или `path: "/workspace/mini_project"` — чтобы анализировать конкретную папку
+
+---
+
+## API
 
 ### Health-check
 
@@ -72,296 +139,167 @@ poetry run uvicorn main:app --reload --port 8081
 
 ## Анализ локального проекта
 
-### 1) Полный JSON-результат
+### 1) Полный JSON
 
 `POST /analyze/local`
 
-Пример запроса (PowerShell):
+Тело запроса:
 
-```powershell
-$body = @{
-  path = "D:\Home_works\project-analyzer"
-  include_tech_stack = $true
-  diagram_format = "plantuml"       # "plantuml" | "mermaid"
-  diagram_max_classes = 15          # top-N classes for diagram
-  diagram_group_by_module = $true
-  diagram_public_only = $false
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post `
-  -Uri "http://127.0.0.1:8081/analyze/local" `
-  -ContentType "application/json" `
-  -Body $body
-```
-
-В ответе есть ключи (упрощённо):
-
-* `meta` — время генерации и опции,
-* `scan` — статистика сканирования, dependency-файлы,
-* `summary` — счётчики (modules/classes/functions/methods/imports),
-* `tech_stack` — стек (если включено),
-* `diagram` — `{format, text}`,
-* `project_model` — JSON-структура проекта.
-
----
-
-### 2) Только диаграмма как текст (удобно копировать)
-
-`POST /analyze/local/diagram`
-
-Пример (PlantUML → `.puml`):
-
-```powershell
-$body = @{
-  path = "D:\Home_works\project-analyzer"
-  diagram_format = "plantuml"
-  diagram_max_classes = 15
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post `
-  -Uri "http://127.0.0.1:8081/analyze/local/diagram" `
-  -ContentType "application/json" `
-  -Body $body `
-  | Out-File diagram_small.puml -Encoding utf8
-```
-
-Пример (Mermaid → `.mmd`):
-
-```powershell
-$body = @{
-  path = "D:\Home_works\project-analyzer"
-  diagram_format = "mermaid"
-  diagram_max_classes = 15
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post `
-  -Uri "http://127.0.0.1:8081/analyze/local/diagram" `
-  -ContentType "application/json" `
-  -Body $body `
-  | Out-File diagram_small.mmd -Encoding utf8
-```
-
----
-
-## Анализ GitHub 
-
-### 1) Полный JSON-результат
-
-`POST /analyze/github`
-
-```powershell
-$body = @{
-  repo_url = "https://github.com/psf/requests"
-  ref = $null                      # optional: branch/tag/commit
-  include_tech_stack = $true
-  diagram_format = "plantuml"
-  diagram_max_classes = 25
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post `
-  -Uri "http://127.0.0.1:8081/analyze/github" `
-  -ContentType "application/json" `
-  -Body $body
+```json
+{
+  "path": "/workspace/mini_project",
+  "use_llm": false,
+  "include_tech_stack": true,
+  "diagram_group_by_module": true,
+  "diagram_public_only": false,
+  "diagram_format": "plantuml",
+  "diagram_max_classes": 40
+}
 ```
 
 ### 2) Только диаграмма как текст
 
-`POST /analyze/github/diagram`
+`POST /analyze/local/diagram`
 
-```powershell
-$body = @{
-  repo_url = "https://github.com/psf/requests"
-  diagram_format = "plantuml"
-  diagram_max_classes = 25
-} | ConvertTo-Json
+То же тело запроса, но ответ будет **PlainText**:
 
-Invoke-RestMethod -Method Post `
-  -Uri "http://127.0.0.1:8081/analyze/github/diagram" `
-  -ContentType "application/json" `
-  -Body $body
-```
-
-> Примечание: клонирование/кэширование может быть ограничено настройками (см. `app/settings.py`).
+* PlantUML: `text/vnd.plantuml`
+* Mermaid: `text/markdown`
 
 ---
 
-## Просмотр PlantUML в PyCharm
+## Анализ GitHub (опционально)
 
-1. Установи плагин **PlantUML Integration**:
+### 1) Полный JSON
 
-   * `Settings → Plugins → Marketplace → PlantUML Integration`
-2. Убедись, что Java доступна:
+`POST /analyze/github`
 
-   ```powershell
-   java -version
-   ```
-3. (Опционально) Установи Graphviz и проверь:
+```json
+{
+  "repo_url": "https://github.com/psf/requests",
+  "ref": null,
+  "include_tech_stack": true,
+  "diagram_format": "plantuml",
+  "diagram_max_classes": 25,
+  "diagram_group_by_module": true,
+  "diagram_public_only": false
+}
+```
 
-   ```powershell
-   dot -V
-   ```
-4. Сгенерируй файл:
+### 2) Только диаграмма
 
-   * `diagram_small.puml`
-5. Открой файл в PyCharm → вкладка/панель **Preview**.
+`POST /analyze/github/diagram`
+
+> ⚠️ Важно: клонирование GitHub **по умолчанию выключено** настройками и вернёт 501 (“не реализовано”), пока не включишь флаг.
+
+Настройки см. `app/settings.py`:
+
+* `github_fetcher_allow_clone` (по умолчанию `False`)
+* `github_fetcher_workspace_dir` (кэш)
+* `github_fetcher_timeout_sec`
+* `github_fetcher_cache_ttl_hours`
+
+---
+
+## Настройки (ENV / .env)
+
+Проект использует `pydantic-settings`, читается `.env` (если есть).
+
+### GitHub fetcher
+
+* `GITHUB_FETCHER_ALLOW_CLONE=true|false`
+* `GITHUB_FETCHER_WORKSPACE_DIR=.cache/repos`
+* `GITHUB_FETCHER_TIMEOUT_SEC=180`
+* `GITHUB_FETCHER_CACHE_TTL_HOURS=72`
+
+### LLM 
+
+По умолчанию LLM выключен
+
+* `LLM_ENABLED=true|false`
+* `LLM_API_BASE=http://localhost:1234` **или** `https://api.openai.com`
+* `LLM_API_KEY=...` (для локальных обычно не нужен)
+* `LLM_MODEL=gpt-4.1-mini` (или любое имя, которое понимает backend)
+* `LLM_TIMEOUT_SEC=120`
+
+---
+
+## Просмотр диаграмм
+
+### PlantUML в PyCharm
+
+1. Плагин **PlantUML Integration**
+2. Java:
+
+```powershell
+java -version
+```
+
+3.  Graphviz:
+
+```powershell
+dot -V
+```
+
+4. Сохрани результат в файл `diagram.puml` → открой Preview.
+
+### Mermaid
+
+Можно вставлять в Markdown-рендереры (GitHub, Mermaid Live Editor и т.п.).
 
 ---
 
 ## Рекомендованные режимы диаграмм
 
-  * `diagram_max_classes = 8..15`
-  * `diagram_public_only = true`
-  * `diagram_group_by_module = false` (если “пакеты” мешают читать)
+**Чтобы не было ковра:**
 
-* Для анализа (внутреннего):
+* `diagram_max_classes = 15..25`
+* `diagram_public_only = true`
+* `diagram_group_by_module = false` (если “пакеты” мешают читать)
 
-  * `diagram_max_classes = 40..0` (0 = без лимита, если поддержано)
-  * `diagram_group_by_module = true`
+**Для анализа (внутреннего):**
+
+* `diagram_max_classes = 40` (или больше)
+* `diagram_group_by_module = true`
 
 ---
 
-## Тесты
+## CI (GitHub Actions)
 
-```bash
-poetry run pytest
-```
+Рекомендуемый пайплайн:
+
+* поднять Python,
+* установить Poetry,
+* закэшировать Poetry/pip,
+* прогнать:
+
+  * `poetry run pytest`
+  * `poetry run black --check .`
+  * `poetry run isort --check-only .`
 
 ---
 
 ## Структура проекта (кратко)
 
 * `app/file_scanner.py` — поиск файлов проекта + статистика
-* `app/code_parser.py` — AST-парсер → ProjectModel
+* `app/code_parser.py` — AST-парсер → `ProjectModel`
 * `app/tech_stack_analyzer.py` — зависимости/импорты → tech stack
 * `app/diagram_generator.py` — PlantUML диаграмма
 * `app/diagram_generator_mermaid.py` — Mermaid диаграмма
+* `app/github_fetcher.py` — клон GitHub (по флагу, кэш + TTL)
 * `app/service.py` — пайплайн анализа (local/github)
+* `app/settings.py` — настройки через env/.env
 * `main.py` — FastAPI API
 
 ---
-## Архитектура и идеология проекта
 
-### Зачем нужен этот инструмент
+## Быстрый чек-лист “работает ли всё”
 
-Проект Analyzer создавался как **инженерный инструмент анализа Python-кода**, а не как генератор документации “ради картинки”.
+1. `docker compose up --build`
+2. Swagger: `/docs`
+3. `POST /analyze/local` с `path="/workspace/..."` (именно путь внутри контейнера)
+4. В ответе:
 
-Основная цель — **понять структуру проекта**:
-
-* какие модули и классы в нём есть,
-* как они связаны между собой,
-* какие технологии и библиотеки используются,
-* где находятся ключевые точки ответственности.
-
----
-
-### Детерминированный анализ (AST-first подход)
-
-В основе анализатора лежит **статический анализ AST (Abstract Syntax Tree)**.
-
-Это означает, что:
-
-* код **не исполняется**;
-* результат анализа **детерминирован** и воспроизводим;
-* отсутствуют побочные эффекты и риски запуска чужого кода;
-* анализ одинаково работает для локальных проектов и GitHub-репозиториев.
-
-AST используется для:
-
-* извлечения классов, функций и методов;
-* определения наследования;
-* анализа импортов;
-* построения базовой модели проекта (`ProjectModel`).
-
-Такой подход делает инструмент:
-
-* безопасным,
-* предсказуемым,
-* расширяемым.
-
----
-
-### Диаграммы как средство анализа, а не самоцель
-
-Полная диаграмма классов для реального проекта почти всегда **нечитаема**.
-Поэтому в проекте используется принцип **top-N архитектурных диаграмм**.
-
-Идея проста:
-
-* вместо отображения *всего* проекта,
-* отображаются **наиболее значимые классы**.
-
-Значимость класса определяется эвристикой:
-
-* количество методов,
-* участие в наследовании,
-* наличие связей (композиция/агрегация).
-
-Это позволяет:
-
-* получить читаемую диаграмму даже для больших проектов;
-* быстро понять архитектуру;
-* использовать диаграмму для презентаций и защиты проекта.
-
----
-
-### Форматы диаграмм
-
-Поддерживаются два текстовых формата:
-
-* **PlantUML** — для классических UML-диаграмм и IDE-просмотра;
-* **Mermaid** — для Markdown и документации.
-
-Генерация происходит **без LLM**, строго на основе модели проекта.
-Это гарантирует:
-
-* воспроизводимость,
-* контроль над результатом,
-* отсутствие “галлюцинаций”.
-
----
-
-### Роль LLM 
-
-Интеграция LLM рассматривается **как надстройка**, а не как ядро системы.
-
-Планируемые сценарии:
-
-* генерация текстовых архитектурных описаний;
-* пояснение связей между модулями;
-* summarization результатов анализа.
-
-При этом:
-
-* LLM **не заменяет** AST-анализ;
-* LLM работает **только поверх уже построенной структуры**.
-
-Такой подход сохраняет инженерную строгость системы.
-
----
-
-### Общий пайплайн
-
-Анализ проекта выполняется в несколько чётко разделённых этапов:
-
-1. **FileScanner** — поиск и фильтрация файлов проекта
-2. **CodeParser** — AST-анализ и построение `ProjectModel`
-3. **TechStackAnalyzer** — определение используемых технологий
-4. **DiagramGenerator** — генерация диаграмм (PlantUML / Mermaid)
-5. **API слой (FastAPI)** — доступ к анализу через REST
-
-Каждый этап изолирован и может быть:
-
-* расширен,
-* протестирован,
-* заменён без переписывания всего проекта.
-
----
-
-### Почему это важно
-
-Такая архитектура:
-
-* отражает реальные инженерные практики;
-* масштабируется на большие проекты;
-* подходит как для обучения, так и для практического использования;
-* демонстрирует понимание архитектуры, а не только синтаксиса Python.
+   * `summary.modules/classes/...` не нули (для тестового проекта),
+   * `diagram.text` содержит `@startuml` … `@enduml` (для PlantUML)
+   * `tech_stack` не `null` (если `include_tech_stack=true`)

@@ -1,0 +1,10 @@
+services:
+  project-analyzer:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - ANALYSIS_ROOT=/workspace
+    volumes:
+      # ← сюда монтируешь анализируемый проект
+      - ./examples:/workspace:ro

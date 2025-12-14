@@ -15,13 +15,8 @@ class Settings(BaseSettings):
     # cache cleanup
     github_fetcher_cache_ttl_hours: int = 72  # 3 дня
 
-    # --- LLM settings ---
-    #
-    # По умолчанию LLM выключен, так что ничего не ломается.
-    # Включить можно через переменные окружения или .env:
-    #   LLM_ENABLED=true
-    #   LLM_API_BASE=http://localhost:1234
-    #   LLM_MODEL=...
+    # --- Local analysis security ---
+    analysis_root: Path | None = None
     #
     llm_enabled: bool = False
     llm_api_base: str | None = None      # например: "http://localhost:1234" или "https://api.openai.com"

@@ -11,6 +11,8 @@ from .diagram_generator import DiagramAI, DiagramGenerator
 from .file_scanner import FileScanner
 from .tech_stack_analyzer import TechStackAnalyzer
 from .github_fetcher import GitHubFetcher
+from .settings import settings
+
 
 
 def _to_jsonable(obj: Any) -> Any:
@@ -112,7 +114,13 @@ def analyze_local_project(
         raise ValueError(f"Root path is not a directory: {root}")
 
     root = root.resolve()
+    if settings.analysis_root is not None:
+        analysis_root = settings.analysis_root.resolve()
 
+        if analysis_root != root and analysis_root not in root.parents:
+            raise ValueError(
+                f"Path '{root}' is outside ANALYSIS_ROOT='{analysis_root}'"
+            )
     scanner = FileScanner(root)
     scan_result = scanner.scan()
 
