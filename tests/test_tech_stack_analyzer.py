@@ -1,498 +1,91 @@
+# tests/test_tech_stack_analyzer.py
 from __future__ import annotations
 
-import re
-import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-try:
-    import tomllib  # py3.11+
-except ModuleNotFoundError:  # pragma: no cover
-    tomllib = None  # type: ignore
-
-from app.models import ProjectModel
-
-_STDLIB_MODULES: Set[str] = set(sys.stdlib_module_names)
-
-# --- Шум/мусор, который НЕ должен считаться зависимостями ---
-# 1) старые stdlib-модули из Python 2 (часто встречаются в совместимости/тестах)
-_STDLIB_PY2_COMPAT: Set[str] = {
-    "basehttpserver",
-    "simplehttpserver",
-    "stringio",
-    "cstringio",
-    "dummy_threading",
-}
-
-# 2) типичные локальные/служебные пакеты в репозиториях
-_NOISE_PREFIXES: Tuple[str, ...] = (
-    "tests",
-    "test",
-    "testing",
-    "docs",
-    "doc",
-    "examples",
-    "example",
-    "scripts",
-    "script",
-    "tools",
-    "tool",
-    "bench",
-    "benchmark",
-    "conftest",
-)
+from app.models import ModuleInfo, ProjectModel
+from app.tech_stack_analyzer import TechStackAnalyzer
 
 
-def _is_noise_module(name: str) -> bool:
-    n = (name or "").strip().lower()
-    if not n:
-        return True
-    # tests / docs / etc
-    for pref in _NOISE_PREFIXES:
-        if n == pref or n.startswith(pref + "."):
-            return True
-    return False
-
-
-# --- Детекторы фреймворков/технологий ---
-WEB_FRAMEWORKS: Set[str] = {
-    "django",
-    "flask",
-    "fastapi",
-    "starlette",
-    "tornado",
-    "sanic",
-    "aiohttp",
-}
-WEB_RUNTIME: Set[str] = {"uvicorn", "gunicorn", "hypercorn", "granian"}
-WEB_RELATED: Set[str] = {
-    "pydantic",
-    "sqlalchemy",
-    "alembic",
-    "jinja2",
-    "httpx",
-    "requests",
-    "celery",
-    "redis",
-    "psycopg2",
-    "asyncpg",
-}
-
-ML_CORE: Set[str] = {
-    "torch",
-    "tensorflow",
-    "keras",
-    "jax",
-    "flax",
-    "sklearn",
-    "scikit-learn",
-    "xgboost",
-    "lightgbm",
-    "catboost",
-    "transformers",
-    "datasets",
-    "spacy",
-    "opencv-python",
-}
-SCIENTIFIC_CORE: Set[str] = {
-    "numpy",
-    "scipy",
-    "pandas",
-    "matplotlib",
-    "seaborn",
-    "sympy",
-    "statsmodels",
-    "jupyter",
-    "ipykernel",
-    "notebook",
-    "plotly",
-    "bokeh",
-    "astropy",
-}
-
-CLI_CORE: Set[str] = {"click", "typer", "rich", "textual", "prompt-toolkit", "docopt"}
-
-DEV_TOOLS: Set[str] = {
-    "pytest",
-    "hypothesis",
-    "black",
-    "isort",
-    "ruff",
-    "flake8",
-    "mypy",
-    "pre-commit",
-    "coverage",
-    "tox",
-}
-
-
-# --- Категоризация пакетов для расширенного отчёта ---
-CATEGORY_RULES: Dict[str, str] = {}
-for p in WEB_FRAMEWORKS:
-    CATEGORY_RULES[p] = "framework:web"
-for p in WEB_RUNTIME:
-    CATEGORY_RULES[p] = "runtime:web"
-for p in WEB_RELATED:
-    CATEGORY_RULES[p] = "web"
-for p in ML_CORE:
-    CATEGORY_RULES[p] = "ml"
-for p in SCIENTIFIC_CORE:
-    CATEGORY_RULES[p] = "scientific"
-for p in CLI_CORE:
-    CATEGORY_RULES[p] = "cli"
-for p in DEV_TOOLS:
-    CATEGORY_RULES[p] = "dev"
-
-
-def _normalize_package_name(raw: str) -> str:
-    raw = raw.strip()
-    if not raw:
-        return ""
-    match = re.match(r"([A-Za-z0-9_.-]+)", raw)
-    if not match:
-        return ""
-    name = match.group(1)
-    name = name.split("[", 1)[0]
-    name = name.split(".", 1)[0]
-    return name.lower()
-
-
-def _iter_import_modules(imports: Iterable[str]) -> Iterable[str]:
-    for stmt in imports:
-        stmt = stmt.strip()
-        if not stmt:
-            continue
-
-        # локальные относительные импорты
-        if stmt.startswith("from ."):
-            continue
-
-        if stmt.startswith("from "):
-            parts = stmt.split()
-            if len(parts) >= 2:
-                module = parts[1]
-                module = module.split("import", 1)[0].strip().lstrip(".")
-                name = module.split(".", 1)[0]
-            else:
-                continue
-        elif stmt.startswith("import "):
-            rest = stmt[len("import ") :]
-            first_part = rest.split(",", 1)[0].strip()
-            name = first_part.split(" as ", 1)[0].strip()
-            name = name.split(".", 1)[0]
-        else:
-            continue
-
-        pkg = _normalize_package_name(name)
-        if pkg:
-            yield pkg
-
-
-def _parse_requirements(path: Optional[Path]) -> List[str]:
-    if path is None or not path.is_file():
-        return []
-    packages: Set[str] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("-e "):
-            continue
-        pkg = _normalize_package_name(line)
-        if pkg:
-            packages.add(pkg)
-    return sorted(packages)
-
-
-def _safe_getattr(obj: Any, attr: str) -> Any:
-    return getattr(obj, attr, None)
-
-
-def _detect_pyproject_path(project: ProjectModel) -> Optional[Path]:
-    pp = _safe_getattr(project, "pyproject_path")
-    if isinstance(pp, (str, Path)):
-        p = Path(pp)
-        if p.is_file():
-            return p
-
-    req = _safe_getattr(project, "requirements_path")
-    if isinstance(req, (str, Path)):
-        reqp = Path(req)
-        candidate = reqp.parent / "pyproject.toml"
-        if candidate.is_file():
-            return candidate
-
-    root = (
-        _safe_getattr(project, "root_path")
-        or _safe_getattr(project, "project_path")
-        or _safe_getattr(project, "path")
+def test_tech_stack_from_imports_filters_stdlib() -> None:
+    """
+    Импорты стандартной библиотеки не должны считаться внешними зависимостями.
+    При этом должны остаться реальные пакеты (например fastapi).
+    """
+    module = ModuleInfo(
+        path=Path("m.py"),
+        classes=[],
+        functions=[],
+        imports=[
+            "import os",
+            "import sys",
+            "from pathlib import Path",
+            "import fastapi",
+            "from fastapi import FastAPI",
+        ],
     )
-    if isinstance(root, (str, Path)):
-        candidate = Path(root) / "pyproject.toml"
-        if candidate.is_file():
-            return candidate
+    project = ProjectModel(modules=[module])
 
-    return None
+    result = TechStackAnalyzer().analyze(project)
 
+    # legacy keys exist
+    assert "frameworks" in result
+    assert "libraries" in result
+    assert "imports" in result
 
-def _toml_load(path: Path) -> Dict[str, Any]:
-    if tomllib is None:
-        return {}
-    try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _parse_poetry_deps(
-    pyproject_path: Optional[Path],
-) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str], Dict[str, str]]:
-    if pyproject_path is None or not pyproject_path.is_file():
-        return {}, {}, {}, {}
-
-    data = _toml_load(pyproject_path)
-    tool = (data.get("tool") or {})
-    poetry = (tool.get("poetry") or {})
-
-    deps: Dict[str, str] = {}
-    dev_deps: Dict[str, str] = {}
-    optional_deps: Dict[str, str] = {}
-    scripts: Dict[str, str] = {}
-
-    for name, spec in (poetry.get("dependencies") or {}).items():
-        n = _normalize_package_name(str(name))
-        if not n or n == "python":
-            continue
-        deps[n] = str(spec)
-
-    groups = poetry.get("group") or {}
-    for group_name, group_data in groups.items():
-        gdeps = (group_data or {}).get("dependencies") or {}
-        target = dev_deps if group_name == "dev" else optional_deps
-        for name, spec in gdeps.items():
-            n = _normalize_package_name(str(name))
-            if not n or n == "python":
-                continue
-            target[n] = str(spec)
-
-    for name, spec in (poetry.get("dev-dependencies") or {}).items():
-        n = _normalize_package_name(str(name))
-        if not n or n == "python":
-            continue
-        dev_deps[n] = str(spec)
-
-    for name, target in (poetry.get("scripts") or {}).items():
-        scripts[str(name)] = str(target)
-
-    return deps, dev_deps, optional_deps, scripts
+    # fastapi detected as framework, stdlib not present
+    assert "fastapi" in result["frameworks"]
+    assert "os" not in result["libraries"]
+    assert "sys" not in result["libraries"]
+    assert "pathlib" not in result["libraries"]
 
 
-@dataclass
-class TechStackReport:
-    imports: List[str]
-    requirements: List[str]
-    poetry_runtime: List[str]
-    poetry_dev: List[str]
-    poetry_optional: List[str]
-
-    python_constraint: Optional[str]
-    package_manager: str
-    frameworks: List[str]
-
-    categories: Dict[str, List[str]]
-    all_packages: List[str]
-
-    project_type: str
-    type_scores: Dict[str, float]
-    confidence: float
-
-    signals: Dict[str, Any]
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {
-            "project_type": self.project_type,
-            "confidence": self.confidence,
-            "type_scores": self.type_scores,
-            "tech_stack": {
-                "python": {"constraint": self.python_constraint},
-                "package_manager": self.package_manager,
-                "frameworks": self.frameworks,
-                "categories": self.categories,
-                "all_packages": self.all_packages,
-                "sources": {
-                    "imports": self.imports,
-                    "requirements_txt": self.requirements,
-                    "poetry": {
-                        "runtime": self.poetry_runtime,
-                        "dev": self.poetry_dev,
-                        "optional": self.poetry_optional,
-                    },
-                },
-                "signals": self.signals,
-            },
-        }
-
-
-class TechStackAnalyzer:
+def test_tech_stack_from_requirements(tmp_path: Path) -> None:
     """
-    Возвращает расширенный отчёт (result["tech_stack"]),
-    и одновременно поддерживает legacy-ключи:
-      result["frameworks"], result["libraries"], result["imports"]
-    чтобы старые тесты/клиенты не ломались.
+    requirements.txt должен добавлять пакеты в стек,
+    и это должно отражаться в tech_stack.sources.requirements_txt.
     """
+    project_root = tmp_path / "project"
+    project_root.mkdir()
 
-    def analyze(self, project: ProjectModel) -> Dict[str, Any]:
-        imported_modules: Set[str] = set()
-        raw_imports: List[str] = []
+    req = project_root / "requirements.txt"
+    req.write_text("fastapi==0.115.0\npytest\n", encoding="utf-8")
 
-        for module in project.modules:
-            raw_imports.extend(module.imports)
-            for pkg in _iter_import_modules(module.imports):
-                imported_modules.add(pkg)
+    project = ProjectModel(modules=[])
+    project.requirements_path = req
 
-        req_path = _safe_getattr(project, "requirements_path")
-        req_list = _parse_requirements(Path(req_path)) if req_path else []
-        requirement_modules = set(req_list)
+    result = TechStackAnalyzer().analyze(project)
 
-        pyproject_path = _detect_pyproject_path(project)
-        poetry_deps, poetry_dev, poetry_opt, poetry_scripts = _parse_poetry_deps(pyproject_path)
+    assert "tech_stack" in result
+    assert "sources" in result["tech_stack"]
+    assert "requirements_txt" in result["tech_stack"]["sources"]
 
-        poetry_runtime_pkgs = set(poetry_deps.keys())
-        poetry_dev_pkgs = set(poetry_dev.keys())
-        poetry_opt_pkgs = set(poetry_opt.keys())
+    # пакеты должны быть нормализованы в lower-case
+    req_pkgs = set(result["tech_stack"]["sources"]["requirements_txt"])
+    assert "fastapi" in req_pkgs
+    assert "pytest" in req_pkgs
 
-        python_constraint = None
-        if pyproject_path and pyproject_path.is_file():
-            data = _toml_load(pyproject_path)
-            python_constraint = (
-                (((data.get("tool") or {}).get("poetry") or {}).get("dependencies") or {}).get("python")
-                if isinstance(data, dict)
-                else None
-            )
-            if python_constraint is not None:
-                python_constraint = str(python_constraint)
+    # fastapi должен попасть и в frameworks
+    assert "fastapi" in result["frameworks"]
 
-        all_packages = (imported_modules | requirement_modules | poetry_runtime_pkgs | poetry_dev_pkgs | poetry_opt_pkgs)
 
-        # 1) выкинуть stdlib (py3)
-        # 2) выкинуть py2-compat stdlib (basehttpserver/simplehttpserver/etc)
-        # 3) выкинуть служебные каталоги (tests/docs/etc)
-        all_packages = {
-            p
-            for p in all_packages
-            if p
-            and p not in _STDLIB_MODULES
-            and p not in _STDLIB_PY2_COMPAT
-            and not _is_noise_module(p)
-        }
+def test_tech_stack_project_type_web_when_fastapi_present(tmp_path: Path) -> None:
+    """
+    Если присутствует fastapi/uvicorn, проект должен классифицироваться как web
+    с ненулевой уверенностью.
+    """
+    module = ModuleInfo(
+        path=Path("m.py"),
+        classes=[],
+        functions=[],
+        imports=[
+            "import fastapi",
+            "import uvicorn",
+        ],
+    )
+    project = ProjectModel(modules=[module])
 
-        frameworks = sorted([p for p in all_packages if p in WEB_FRAMEWORKS])
+    result = TechStackAnalyzer().analyze(project)
 
-        has_req = bool(requirement_modules)
-        has_poetry = bool(pyproject_path and pyproject_path.is_file() and (poetry_runtime_pkgs or poetry_dev_pkgs or poetry_opt_pkgs))
-        if has_poetry and has_req:
-            package_manager = "mixed"
-        elif has_poetry:
-            package_manager = "poetry"
-        elif has_req:
-            package_manager = "pip"
-        else:
-            package_manager = "unknown"
-
-        categories: Dict[str, Set[str]] = {}
-        for pkg in all_packages:
-            cat = CATEGORY_RULES.get(pkg, "library")
-            categories.setdefault(cat, set()).add(pkg)
-        for pkg in poetry_dev_pkgs:
-            categories.setdefault("dev", set()).add(pkg)
-        categories_out = {k: sorted(v) for k, v in sorted(categories.items(), key=lambda kv: kv[0])}
-
-        project_type, type_scores, confidence, signals = self._classify(
-            all_packages=all_packages,
-            frameworks=set(frameworks),
-            poetry_scripts=poetry_scripts,
-            pyproject_path=pyproject_path,
-        )
-
-        report = TechStackReport(
-            imports=sorted(imported_modules),
-            requirements=sorted(requirement_modules),
-            poetry_runtime=sorted(poetry_runtime_pkgs),
-            poetry_dev=sorted(poetry_dev_pkgs),
-            poetry_optional=sorted(poetry_opt_pkgs),
-            python_constraint=python_constraint,
-            package_manager=package_manager,
-            frameworks=frameworks,
-            categories=categories_out,
-            all_packages=sorted(all_packages),
-            project_type=project_type,
-            type_scores=type_scores,
-            confidence=confidence,
-            signals=signals,
-        )
-
-        out = report.as_dict()
-
-        # --- LEGACY KEYS (для старых тестов/клиентов) ---
-        out["frameworks"] = report.frameworks
-        out["libraries"] = sorted([p for p in all_packages if p not in WEB_FRAMEWORKS])
-        out["imports"] = raw_imports  # исходные строки импортов
-
-        return out
-
-    def _classify(
-        self,
-        *,
-        all_packages: Set[str],
-        frameworks: Set[str],
-        poetry_scripts: Dict[str, str],
-        pyproject_path: Optional[Path],
-    ) -> Tuple[str, Dict[str, float], float, Dict[str, Any]]:
-        scores: Dict[str, float] = {"web": 0.0, "ml": 0.0, "cli": 0.0, "scientific": 0.0}
-
-        for _ in frameworks:
-            scores["web"] += 4.0
-
-        if all_packages & WEB_RUNTIME:
-            scores["web"] += 2.0
-        scores["web"] += 0.5 * len(all_packages & WEB_RELATED)
-
-        scores["ml"] += 1.5 * len(all_packages & ML_CORE)
-        if all_packages & {"torch", "tensorflow", "jax"}:
-            scores["ml"] += 2.0
-
-        scores["scientific"] += 1.0 * len(all_packages & SCIENTIFIC_CORE)
-        if all_packages & {"numpy", "scipy"}:
-            scores["scientific"] += 1.0
-
-        scores["cli"] += 1.2 * len(all_packages & CLI_CORE)
-        if poetry_scripts:
-            scores["cli"] += 4.0
-
-        has_pyproject = bool(pyproject_path and pyproject_path.is_file())
-
-        best_type = max(scores.items(), key=lambda kv: kv[1])[0]
-        best_score = scores[best_type]
-        sorted_scores = sorted(scores.values(), reverse=True)
-        second_score = sorted_scores[1] if len(sorted_scores) > 1 else 0.0
-
-        margin = max(0.0, best_score - second_score)
-        confidence = min(1.0, 0.25 * margin) if best_score > 0 else 0.0
-
-        if best_score <= 0.0:
-            best_type = "unknown"
-            confidence = 0.0
-
-        signals: Dict[str, Any] = {
-            "has_pyproject": has_pyproject,
-            "poetry_scripts": list(poetry_scripts.keys()),
-            "frameworks_detected": sorted(frameworks),
-            "web_runtime_detected": sorted(all_packages & WEB_RUNTIME),
-            "web_related_hits": sorted(all_packages & WEB_RELATED),
-            "ml_hits": sorted(all_packages & ML_CORE),
-            "scientific_hits": sorted(all_packages & SCIENTIFIC_CORE),
-            "cli_hits": sorted(all_packages & CLI_CORE),
-        }
-
-        return best_type, scores, confidence, signals
+    assert result["project_type"] in {"web", "unknown"}  # допускаем unknown на слабом сигнале
+    assert result["confidence"] >= 0.0

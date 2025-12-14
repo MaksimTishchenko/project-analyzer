@@ -13,6 +13,12 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from .models import ProjectModel
 
+# =============================================================================
+# Knowledge bases / heuristics
+# =============================================================================
+
+# sys.stdlib_module_names есть начиная с Python 3.10+. Здесь мы полагаемся на него,
+# чтобы не считать стандартную библиотеку внешними зависимостями.
 _STDLIB_MODULES: Set[str] = set(sys.stdlib_module_names)
 
 # --- Шум/мусор, который НЕ должен считаться зависимостями ---
@@ -43,15 +49,22 @@ _NOISE_PREFIXES: Tuple[str, ...] = (
     "conftest",
 )
 
+
 def _is_noise_module(name: str) -> bool:
+    """
+    Быстрая фильтрация «локального шума» по имени модуля.
+
+    Примеры:
+    - tests.*, docs.*, examples.*, scripts.*, tools.* и т.п.
+    """
     n = (name or "").strip().lower()
     if not n:
         return True
-    # tests / docs / etc
     for pref in _NOISE_PREFIXES:
         if n == pref or n.startswith(pref + "."):
             return True
     return False
+
 
 # --- Детекторы фреймворков/технологий ---
 WEB_FRAMEWORKS: Set[str] = {
@@ -142,7 +155,19 @@ for p in DEV_TOOLS:
     CATEGORY_RULES[p] = "dev"
 
 
+# =============================================================================
+# Parsing utilities
+# =============================================================================
+
 def _normalize_package_name(raw: str) -> str:
+    """
+    Нормализует «пакетоподобную» строку до имени пакета (lowercase).
+
+    Поддерживает входы:
+    - "requests>=2.0"
+    - "pydantic[email]"
+    - "pkg.submodule"
+    """
     raw = raw.strip()
     if not raw:
         return ""
@@ -156,6 +181,14 @@ def _normalize_package_name(raw: str) -> str:
 
 
 def _iter_import_modules(imports: Iterable[str]) -> Iterable[str]:
+    """
+    Извлекает top-level имя пакета из строк импортов, собранных CodeParser.
+
+    Поддерживает:
+    - "import a, b as c"
+    - "from pkg.sub import x"
+    - игнорирует относительные импорты "from ."
+    """
     for stmt in imports:
         stmt = stmt.strip()
         if not stmt:
@@ -187,6 +220,13 @@ def _iter_import_modules(imports: Iterable[str]) -> Iterable[str]:
 
 
 def _parse_requirements(path: Optional[Path]) -> List[str]:
+    """
+    Простой парсер requirements.txt (консервативно).
+
+    Пропускает:
+    - пустые строки и комментарии
+    - editable installs (-e ...)
+    """
     if path is None or not path.is_file():
         return []
     packages: Set[str] = set()
@@ -203,10 +243,19 @@ def _parse_requirements(path: Optional[Path]) -> List[str]:
 
 
 def _safe_getattr(obj: Any, attr: str) -> Any:
+    """getattr(..., None) как отдельная утилита для единообразия."""
     return getattr(obj, attr, None)
 
 
 def _detect_pyproject_path(project: ProjectModel) -> Optional[Path]:
+    """
+    Пытается найти pyproject.toml разными путями.
+
+    Порядок приоритетов:
+    1) project.pyproject_path (если он уже проставлен service/file_scanner)
+    2) рядом с requirements.txt (если оно есть)
+    3) в корне проекта, если он доступен как root_path/project_path/path
+    """
     pp = _safe_getattr(project, "pyproject_path")
     if isinstance(pp, (str, Path)):
         p = Path(pp)
@@ -230,6 +279,11 @@ def _detect_pyproject_path(project: ProjectModel) -> Optional[Path]:
 
 
 def _toml_load(path: Path) -> Dict[str, Any]:
+    """
+    Загружает TOML, если доступен tomllib (py3.11+).
+
+    Гарантия: не выбрасывает исключения наружу — возвращает {} при ошибках.
+    """
     if tomllib is None:
         return {}
     try:
@@ -238,7 +292,18 @@ def _toml_load(path: Path) -> Dict[str, Any]:
         return {}
 
 
-def _parse_poetry_deps(pyproject_path: Optional[Path]) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str], Dict[str, str]]:
+def _parse_poetry_deps(
+    pyproject_path: Optional[Path],
+) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str], Dict[str, str]]:
+    """
+    Извлекает зависимости Poetry из `tool.poetry.*`.
+
+    Возвращает:
+    - deps: runtime зависимости (tool.poetry.dependencies, кроме python)
+    - dev_deps: dev зависимости (tool.poetry.dev-dependencies и/или group.dev.dependencies)
+    - optional_deps: зависимости других групп (group.<name>.dependencies, кроме dev)
+    - scripts: entrypoints tool.poetry.scripts
+    """
     if pyproject_path is None or not pyproject_path.is_file():
         return {}, {}, {}, {}
 
@@ -279,8 +344,19 @@ def _parse_poetry_deps(pyproject_path: Optional[Path]) -> Tuple[Dict[str, str], 
     return deps, dev_deps, optional_deps, scripts
 
 
+# =============================================================================
+# Report model
+# =============================================================================
+
 @dataclass
 class TechStackReport:
+    """
+    Нормализованный отчёт о стеке проекта.
+
+    Этот объект — “внутренний DTO”: удобно держать структуру в одном месте,
+    а наружу отдавать dict через as_dict() (плюс legacy-ключи в TechStackAnalyzer.analyze()).
+    """
+
     imports: List[str]
     requirements: List[str]
     poetry_runtime: List[str]
@@ -301,6 +377,9 @@ class TechStackReport:
     signals: Dict[str, Any]
 
     def as_dict(self) -> Dict[str, Any]:
+        """
+        Возвращает словарь в стабильном формате (удобно сериализовать в JSON).
+        """
         return {
             "project_type": self.project_type,
             "confidence": self.confidence,
@@ -325,27 +404,46 @@ class TechStackReport:
         }
 
 
+# =============================================================================
+# Public analyzer
+# =============================================================================
+
 class TechStackAnalyzer:
     """
-    Возвращает расширенный отчёт (result["tech_stack"]),
-    и одновременно поддерживает legacy-ключи:
-      result["frameworks"], result["libraries"], result["imports"]
-    чтобы старые тесты/клиенты не ломались.
+    Собирает расширенный тех-отчёт по проекту.
+
+    Особенность: одновременно поддерживает legacy-ключи:
+      - result["frameworks"]
+      - result["libraries"]
+      - result["imports"]
+    чтобы старые тесты/клиенты не ломались. :contentReference[oaicite:1]{index=1}
     """
 
     def analyze(self, project: ProjectModel) -> Dict[str, Any]:
+        """
+        Основной вход: принимает ProjectModel и возвращает dict-отчёт.
+
+        Источники сигналов:
+        - импорты из AST (project.modules[*].imports)
+        - requirements.txt (если был найден)
+        - pyproject.toml (Poetry), если доступен
+        """
         imported_modules: Set[str] = set()
         raw_imports: List[str] = []
 
+        # --- imports from analyzed modules ---
         for module in project.modules:
             raw_imports.extend(module.imports)
             for pkg in _iter_import_modules(module.imports):
+                # шум/пустое/не-нормализованное будет отфильтровано далее
                 imported_modules.add(pkg)
 
+        # --- requirements.txt ---
         req_path = _safe_getattr(project, "requirements_path")
         req_list = _parse_requirements(Path(req_path)) if req_path else []
         requirement_modules = set(req_list)
 
+        # --- Poetry deps (pyproject.toml) ---
         pyproject_path = _detect_pyproject_path(project)
         poetry_deps, poetry_dev, poetry_opt, poetry_scripts = _parse_poetry_deps(pyproject_path)
 
@@ -353,6 +451,7 @@ class TechStackAnalyzer:
         poetry_dev_pkgs = set(poetry_dev.keys())
         poetry_opt_pkgs = set(poetry_opt.keys())
 
+        # --- python constraint (if available) ---
         python_constraint = None
         if pyproject_path and pyproject_path.is_file():
             data = _toml_load(pyproject_path)
@@ -364,11 +463,26 @@ class TechStackAnalyzer:
             if python_constraint is not None:
                 python_constraint = str(python_constraint)
 
+        # --- merge all packages (imports + manifests) ---
         all_packages = (imported_modules | requirement_modules | poetry_runtime_pkgs | poetry_dev_pkgs | poetry_opt_pkgs)
-        all_packages = {p for p in all_packages if p and p not in _STDLIB_MODULES}
+
+        # Фильтрация:
+        # - пустые
+        # - stdlib (текущий python)
+        # - stdlib py2 compat
+        # - шумовые пространства имён (tests/docs/etc)
+        all_packages = {
+            p
+            for p in all_packages
+            if p
+            and p not in _STDLIB_MODULES
+            and p not in _STDLIB_PY2_COMPAT
+            and not _is_noise_module(p)
+        }
 
         frameworks = sorted([p for p in all_packages if p in WEB_FRAMEWORKS])
 
+        # --- choose package manager label ---
         has_req = bool(requirement_modules)
         has_poetry = bool(pyproject_path and pyproject_path.is_file() and (poetry_runtime_pkgs or poetry_dev_pkgs or poetry_opt_pkgs))
         if has_poetry and has_req:
@@ -380,14 +494,17 @@ class TechStackAnalyzer:
         else:
             package_manager = "unknown"
 
+        # --- categorize packages ---
         categories: Dict[str, Set[str]] = {}
         for pkg in all_packages:
             cat = CATEGORY_RULES.get(pkg, "library")
             categories.setdefault(cat, set()).add(pkg)
+        # dev deps всегда считаем dev-категорией дополнительно
         for pkg in poetry_dev_pkgs:
             categories.setdefault("dev", set()).add(pkg)
         categories_out = {k: sorted(v) for k, v in sorted(categories.items(), key=lambda kv: kv[0])}
 
+        # --- classify project type ---
         project_type, type_scores, confidence, signals = self._classify(
             all_packages=all_packages,
             frameworks=set(frameworks),
@@ -430,6 +547,15 @@ class TechStackAnalyzer:
         poetry_scripts: Dict[str, str],
         pyproject_path: Optional[Path],
     ) -> Tuple[str, Dict[str, float], float, Dict[str, Any]]:
+        """
+        Классифицирует “тип проекта” на основе слабых сигналов (эвристика).
+
+        Выход:
+        - best_type: web/ml/cli/scientific/unknown
+        - scores: score-таблица для каждого типа
+        - confidence: [0..1], грубая уверенность
+        - signals: отладочные сигналы (что именно сработало)
+        """
         scores: Dict[str, float] = {"web": 0.0, "ml": 0.0, "cli": 0.0, "scientific": 0.0}
 
         for _ in frameworks:

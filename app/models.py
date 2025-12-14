@@ -8,7 +8,17 @@ from typing import Dict, List, Optional
 
 @dataclass
 class FunctionInfo:
-    """Information about a function or method in the codebase."""
+    """
+    Метаданные о функции или методе в кодовой базе.
+
+    name:
+      Имя функции/метода как оно объявлено в исходнике.
+    lineno:
+      Номер строки объявления (1-based), если AST смог его дать.
+    decorators:
+      Список декораторов в строковом виде (как извлечено из AST).
+      Используется для различения @classmethod/@staticmethod и др. в диаграммах/отчётах.
+    """
 
     name: str
     lineno: Optional[int] = None
@@ -17,7 +27,23 @@ class FunctionInfo:
 
 @dataclass
 class AttributeInfo:
-    """Information about a class or instance attribute."""
+    """
+    Метаданные об атрибуте класса или экземпляра.
+
+    name:
+      Имя атрибута (например, `x` для `self.x`).
+    type:
+      Строковое представление типа (из аннотации или эвристически выведенное),
+      либо None, если тип не удалось определить.
+    lineno:
+      Номер строки, где атрибут был обнаружен.
+    is_instance:
+      True  -> атрибут экземпляра (self.x)
+      False -> атрибут класса (Class.x)
+    declared_in_init:
+      True, если атрибут экземпляра впервые обнаружен внутри __init__.
+      Это полезно для понимания “инициализируется ли поле в конструкторе”.
+    """
 
     name: str
     type: Optional[str] = None
@@ -28,21 +54,51 @@ class AttributeInfo:
 
 @dataclass
 class CompositionInfo:
-    """Represents relation A (*-- or o--) B (A has field of type B)."""
+    """
+    Связь "A имеет поле типа B" (для диаграмм).
+
+    owner:
+      Имя владельца (класс A).
+    attribute:
+      Имя поля/атрибута, через которое держится ссылка/владение.
+    target:
+      Имя целевого класса/типа (B).
+    lineno:
+      Номер строки, где связь была обнаружена (если известен).
+
+    kind:
+      "composition" -> *-- (владение: объект создаётся/присваивается внутри)
+      "aggregation" -> o-- (ссылка: обычно приходит извне или только аннотирована)
+    """
 
     owner: str
     attribute: str
     target: str
     lineno: Optional[int] = None
 
-    # "composition" -> *-- (владение: создаём внутри)
-    # "aggregation" -> o-- (ссылка: получили извне/аннотация)
     kind: str = "composition"
 
 
 @dataclass
 class ClassInfo:
-    """Information about a class in a module."""
+    """
+    Метаданные о классе в модуле.
+
+    name:
+      Имя класса.
+    bases:
+      Список базовых классов (как строки из AST). Может содержать qualified-имена.
+    init:
+      Метаданные __init__ (если присутствует). Хранится отдельно от остальных методов.
+    methods:
+      Метаданные остальных методов (кроме __init__).
+    attributes:
+      Список найденных атрибутов класса/экземпляра.
+    compositions:
+      Список связей композиции/агрегации, найденных по типам/присваиваниям.
+    lineno:
+      Номер строки объявления класса.
+    """
 
     name: str
     bases: List[str] = field(default_factory=list)
@@ -62,7 +118,18 @@ class ClassInfo:
 
 @dataclass
 class ModuleInfo:
-    """Information about a Python module (file)."""
+    """
+    Метаданные о Python-модуле (файле).
+
+    path:
+      Путь к файлу модуля.
+    classes:
+      Список классов, найденных в модуле.
+    functions:
+      Список топ-уровневых функций, найденных в модуле.
+    imports:
+      Импорты модуля, сохранённые в строковом виде для отчётов/диаграмм.
+    """
 
     path: Path
     classes: List[ClassInfo] = field(default_factory=list)
@@ -72,7 +139,18 @@ class ModuleInfo:
 
 @dataclass
 class ProjectModel:
-    """Aggregated information about the whole project."""
+    """
+    Агрегированная модель проекта (результат анализа).
+
+    modules:
+      Список модулей (каждый соответствует одному .py файлу).
+    requirements_path:
+      Путь к requirements.txt, если он был найден сканером.
+
+    pyproject_path/setup_cfg_path/dependency_files:
+      Дополнительные dependency-related пути.
+      Оставлены ради обратной совместимости, если их уже использует код вокруг.
+    """
 
     modules: List[ModuleInfo] = field(default_factory=list)
     requirements_path: Optional[Path] = None

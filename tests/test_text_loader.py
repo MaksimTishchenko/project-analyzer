@@ -1,12 +1,21 @@
 # tests/test_text_loader.py
+from __future__ import annotations
+
 from pathlib import Path
 
 from app.text_loader import read_python_source
 
 
 def test_read_python_source_pep263_cp1251(tmp_path: Path) -> None:
+    """
+    PEP-263: если в первых двух строках указан coding cookie, ридер должен:
+    - прочитать файл в этой кодировке,
+    - не включать fallback,
+    - корректно вернуть кириллицу.
+    """
     p = tmp_path / "cp1251.py"
-    # PEP-263 header + Cyrillic text in cp1251 bytes
+
+    # PEP-263 header + Cyrillic text encoded as cp1251 bytes
     raw = "# -*- coding: cp1251 -*-\n# Привет\nx = 1\n".encode("cp1251")
     p.write_bytes(raw)
 
@@ -17,8 +26,15 @@ def test_read_python_source_pep263_cp1251(tmp_path: Path) -> None:
 
 
 def test_read_python_source_fallback_never_crashes(tmp_path: Path) -> None:
+    """
+    Даже при битых байтах файл должен быть прочитан best-effort:
+    - функция не падает,
+    - текст возвращается (errors='replace'),
+    - кодировка остаётся utf-8*.
+    """
     p = tmp_path / "broken.py"
-    # invalid utf-8 bytes
+
+    # Invalid UTF-8 bytes (simulate corrupted file)
     p.write_bytes(b"\xff\xfe\xfa\nx=1\n")
 
     src = read_python_source(p)

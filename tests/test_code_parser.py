@@ -1,4 +1,5 @@
-# tests/test_code_parser.py
+from __future__ import annotations
+
 from pathlib import Path
 
 from app.code_parser import CodeParser
@@ -6,6 +7,14 @@ from app.models import ClassInfo, FunctionInfo, ModuleInfo, ProjectModel
 
 
 def test_parse_file_basic_structure(tmp_path: Path) -> None:
+    """
+    Базовый сценарий: импорты, top-level функции (включая async + decorators),
+    классы, наследование, методы и lineno.
+
+    Важно:
+    - тест намеренно проверяет точные номера строк (lineno),
+      поэтому текст файла должен оставаться в том же виде/формате.
+    """
     file_path = tmp_path / "example.py"
     file_path.write_text(
         "import os\n"
@@ -108,6 +117,9 @@ def test_parse_file_basic_structure(tmp_path: Path) -> None:
 
 
 def test_parse_files_returns_project_model(tmp_path: Path) -> None:
+    """
+    parse_files должен возвращать ProjectModel и содержать ModuleInfo для каждого файла.
+    """
     file1 = tmp_path / "a.py"
     file2 = tmp_path / "b.py"
 
@@ -129,6 +141,12 @@ def test_parse_files_returns_project_model(tmp_path: Path) -> None:
 
 
 def test_parse_attributes_init_and_composition(tmp_path: Path) -> None:
+    """
+    Атрибуты:
+    - __init__ хранится отдельно
+    - instance attrs помечаются declared_in_init
+    - composition/aggregation отношения к B находятся по аннотациям/присваиваниям
+    """
     file_path = tmp_path / "m.py"
     file_path.write_text(
         "class B:\n"
@@ -166,3 +184,24 @@ def test_parse_attributes_init_and_composition(tmp_path: Path) -> None:
     # композиция A *-- B (по b: B и c: B = B() и m = B())
     comps = {(x.owner, x.attribute, x.target) for x in a.compositions}
     assert ("A", "b", "B") in comps or ("A", "c", "B") in comps or ("A", "m", "B") in comps
+
+
+def test_parse_file_syntax_error_does_not_crash(tmp_path: Path) -> None:
+    """
+    При SyntaxError парсер не должен падать: возвращает ModuleInfo с пустыми списками.
+    """
+    file_path = tmp_path / "bad.py"
+    file_path.write_text("def x(:\n    pass\n", encoding="utf-8")
+
+    parser = CodeParser()
+    m = parser.parse_file(file_path)
+
+    # module object returned, but empty structure
+    assert m.path == file_path.resolve()
+    assert m.classes == []
+    assert m.functions == []
+    assert m.imports == []
+
+    # optional metadata: parse_error may exist
+    if hasattr(m, "parse_error"):
+        assert "SyntaxError" in getattr(m, "parse_error")

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 from app.diagram_generator_mermaid import MermaidDiagramGenerator
@@ -11,16 +13,18 @@ from app.models import (
 
 
 def test_mermaid_renders_composition_and_aggregation() -> None:
+    """
+    Mermaid-генератор должен:
+    - рендерить composition как `*--`
+    - рендерить aggregation как `o--`
+    - печатать label атрибута после двоеточия без кавычек (как ожидает текущий формат)
+    """
     a = ClassInfo(name="A", bases=[], methods=[], lineno=1)
     b = ClassInfo(name="B", bases=[], methods=[], lineno=2)
     c = ClassInfo(name="C", bases=[], methods=[], lineno=3)
 
-    a.compositions.append(
-        CompositionInfo(owner="A", attribute="b", target="B", kind="composition")
-    )
-    a.compositions.append(
-        CompositionInfo(owner="A", attribute="c", target="C", kind="aggregation")
-    )
+    a.compositions.append(CompositionInfo(owner="A", attribute="b", target="B", kind="composition"))
+    a.compositions.append(CompositionInfo(owner="A", attribute="c", target="C", kind="aggregation"))
 
     module = ModuleInfo(path=Path("m.py"), classes=[a, b, c], functions=[], imports=[])
     project = ProjectModel(modules=[module])
@@ -33,6 +37,11 @@ def test_mermaid_renders_composition_and_aggregation() -> None:
 
 
 def test_mermaid_shows_only_public_methods() -> None:
+    """
+    Mermaid-генератор должен показывать только публичные методы:
+    - pub остаётся
+    - _priv и __dunder__ не должны появляться
+    """
     a = ClassInfo(
         name="A",
         bases=[],
@@ -56,6 +65,9 @@ def test_mermaid_shows_only_public_methods() -> None:
 
 
 def test_mermaid_inheritance() -> None:
+    """
+    Наследование в Mermaid должно быть в формате: `Base <|-- Child`.
+    """
     base = ClassInfo(name="Base", bases=[], methods=[], lineno=1)
     child = ClassInfo(name="Child", bases=["Base"], methods=[], lineno=2)
 

@@ -1,4 +1,3 @@
-# app/__init__.py
 """
 Application package for Python project analyzer.
 """

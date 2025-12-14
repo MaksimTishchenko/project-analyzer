@@ -1,4 +1,3 @@
-# app/service.py
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
@@ -9,13 +8,26 @@ from typing import Any
 from .code_parser import CodeParser
 from .diagram_generator import DiagramAI, DiagramGenerator
 from .file_scanner import FileScanner
-from .tech_stack_analyzer import TechStackAnalyzer
 from .github_fetcher import GitHubFetcher
 from .settings import settings
-
+from .tech_stack_analyzer import TechStackAnalyzer
 
 
 def _to_jsonable(obj: Any) -> Any:
+    """
+    Приводит объект к JSON-сериализуемому виду.
+
+    Поддерживает:
+    - None -> None
+    - Path -> str(path)
+    - dataclass -> asdict + рекурсивное преобразование
+    - dict/list/tuple/set -> рекурсивное преобразование элементов
+    - pydantic-подобные объекты -> пробует `model_dump()` или `dict()`
+
+    Важно:
+    - Это *утилита вывода*, она не должна ломать анализ.
+    - Любые ошибки сериализации "мягко" игнорируются и возвращается исходный объект.
+    """
     if obj is None:
         return None
 
@@ -42,6 +54,11 @@ def _to_jsonable(obj: Any) -> Any:
 
 
 def _compute_summary(project_model: Any) -> dict[str, int]:
+    """
+    Быстрый агрегированный summary по результату парсинга.
+
+    Использует getattr(..., default) чтобы не зависеть жёстко от точной формы моделей.
+    """
     modules = getattr(project_model, "modules", []) or []
 
     classes_count = 0
@@ -71,6 +88,25 @@ def _compute_summary(project_model: Any) -> dict[str, int]:
     }
 
 
+def _enforce_analysis_root(root: Path) -> None:
+    """
+    Defense-in-depth "gate": если задан settings.analysis_root, анализируемый root
+    обязан быть внутри него.
+
+    IMPORTANT:
+    - root должен быть уже resolved (без '..', symlinks схлопнуты)
+    - analysis_root уже resolve/провалидирован в settings
+    """
+    if settings.analysis_root is None:
+        return
+
+    ar = settings.analysis_root
+    try:
+        root.relative_to(ar)
+    except ValueError as e:
+        raise ValueError(f"Path '{root}' is outside ANALYSIS_ROOT='{ar}'") from e
+
+
 def _build_plantuml_generator(
     *,
     diagram_public_only: bool,
@@ -78,11 +114,13 @@ def _build_plantuml_generator(
     diagram_max_classes: int,
 ) -> DiagramGenerator:
     """
-    Create DiagramGenerator safely:
-    - If DiagramGenerator supports max_classes, pass it.
-    - If not, don't pass it (to avoid TypeError).
+    Создаёт DiagramGenerator максимально безопасно по совместимости.
+
+    Причина:
+    - В некоторых версиях DiagramGenerator может не поддерживать max_classes
+      (тогда конструктор бросит TypeError).
+    - Мы сохраняем совместимость через try/except.
     """
-    # Try with max_classes (newer interface)
     try:
         return DiagramGenerator(
             public_only=diagram_public_only,
@@ -90,11 +128,20 @@ def _build_plantuml_generator(
             max_classes=diagram_max_classes,
         )
     except TypeError:
-        # Fallback to old interface (your current one)
         return DiagramGenerator(
             public_only=diagram_public_only,
             group_by_module=diagram_group_by_module,
         )
+
+
+def _normalize_diagram_format(diagram_format: str | None) -> str:
+    """
+    Нормализует формат диаграммы и валидирует, что он поддерживается.
+    """
+    fmt = (diagram_format or "plantuml").strip().lower()
+    if fmt not in {"plantuml", "mermaid"}:
+        raise ValueError("diagram_format must be 'plantuml' or 'mermaid'")
+    return fmt
 
 
 def analyze_local_project(
@@ -106,21 +153,28 @@ def analyze_local_project(
     diagram_format: str = "plantuml",
     diagram_max_classes: int = 40,
 ) -> dict[str, Any]:
-    root = Path(path)
+    """
+    Анализирует локальную директорию проекта и возвращает “расширенный” результат.
 
+    Pipeline:
+    1) Валидация root (существует, директория, resolve)
+    2) Security gate: enforce analysis_root (если настроено)
+    3) FileScanner -> список .py + dependency файлы
+    4) CodeParser -> ProjectModel
+    5) (опционально) TechStackAnalyzer
+    6) Генерация диаграммы (PlantUML или Mermaid, опционально с LLM)
+    7) Сбор результата: legacy-поля + meta/scan/summary/project_model/diagram
+    """
+    root = Path(path).expanduser()
     if not root.exists():
         raise FileNotFoundError(f"Path not found: {root}")
     if not root.is_dir():
         raise ValueError(f"Root path is not a directory: {root}")
 
+    # Resolve strictly to remove '..' and collapse symlinks.
     root = root.resolve()
-    if settings.analysis_root is not None:
-        analysis_root = settings.analysis_root.resolve()
+    _enforce_analysis_root(root)
 
-        if analysis_root != root and analysis_root not in root.parents:
-            raise ValueError(
-                f"Path '{root}' is outside ANALYSIS_ROOT='{analysis_root}'"
-            )
     scanner = FileScanner(root)
     scan_result = scanner.scan()
 
@@ -137,24 +191,23 @@ def analyze_local_project(
     if include_tech_stack:
         tech_stack = TechStackAnalyzer().analyze(project)
 
-    diagram_format_norm = (diagram_format or "plantuml").strip().lower()
-    if diagram_format_norm not in {"plantuml", "mermaid"}:
-        raise ValueError("diagram_format must be 'plantuml' or 'mermaid'")
+    fmt = _normalize_diagram_format(diagram_format)
 
     # --- Diagram generation (safe mode) ---
-    if diagram_format_norm == "plantuml":
+    if fmt == "plantuml":
         generator = _build_plantuml_generator(
             diagram_public_only=diagram_public_only,
             diagram_group_by_module=diagram_group_by_module,
             diagram_max_classes=int(diagram_max_classes or 0),
         )
+
         if use_llm:
             diagram_text = DiagramAI(generator=generator).generate_with_llm(project)
         else:
             diagram_text = generator.generate_class_diagram(project)
 
     else:
-        # Mermaid is optional. We keep it safe: if module/class doesn't exist -> clear error.
+        # Mermaid is optional. If not available -> clear error.
         try:
             from .diagram_generator_mermaid import MermaidDiagramGenerator  # type: ignore
         except Exception as e:
@@ -170,7 +223,6 @@ def analyze_local_project(
                 max_classes=int(diagram_max_classes or 0),
             )
         except TypeError:
-            # Older mermaid generator interface
             gen = MermaidDiagramGenerator(
                 public_only=diagram_public_only,
                 group_by_module=diagram_group_by_module,
@@ -185,7 +237,8 @@ def analyze_local_project(
         "requirements_path": str(scan_result.requirements_file) if scan_result.requirements_file else None,
         "pyproject_path": str(scan_result.pyproject_file) if scan_result.pyproject_file else None,
         "tech_stack": tech_stack,
-        "diagram_plantuml": diagram_text if diagram_format_norm == "plantuml" else None,
+        # legacy field: only meaningful for plantuml
+        "diagram_plantuml": diagram_text if fmt == "plantuml" else None,
     }
 
     # --- Extended "pretty" contract ---
@@ -199,7 +252,7 @@ def analyze_local_project(
                     "include_tech_stack": bool(include_tech_stack),
                     "diagram_group_by_module": bool(diagram_group_by_module),
                     "diagram_public_only": bool(diagram_public_only),
-                    "diagram_format": diagram_format_norm,
+                    "diagram_format": fmt,
                     "diagram_max_classes": int(diagram_max_classes),
                 },
             },
@@ -212,7 +265,7 @@ def analyze_local_project(
             },
             "summary": _compute_summary(project),
             "project_model": _to_jsonable(project),
-            "diagram": {"format": diagram_format_norm, "text": diagram_text},
+            "diagram": {"format": fmt, "text": diagram_text},
         }
     )
 
@@ -234,6 +287,14 @@ def analyze_github_project(
     timeout_sec: int = 180,
     cache_ttl_hours: int = 72,
 ) -> dict[str, Any]:
+    """
+    Анализирует GitHub-репозиторий:
+    - скачивает/кэширует repo (GitHubFetcher)
+    - затем прогоняет analyze_local_project на локальном пути
+
+    Примечание:
+    - allow_clone по умолчанию False (безопасный режим)
+    """
     fetcher = GitHubFetcher(
         allow_clone=allow_clone,
         workspace_dir=workspace_dir,

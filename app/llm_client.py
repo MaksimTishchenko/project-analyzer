@@ -1,4 +1,3 @@
-# app/llm_client.py
 from __future__ import annotations
 
 import json
@@ -11,10 +10,16 @@ from .settings import settings
 
 class LLMClient:
     """
-    Простой клиент для OpenAI-совместимых /v1/chat/completions эндпоинтов.
+    Мини-клиент для OpenAI-совместимых `/v1/chat/completions` эндпоинтов.
 
-    Работает и с облачными (OpenAI, TogetherAI и т.п.),
-    и с локальными (LM Studio, Ollama), если они эмулируют этот API.
+    Подходит для:
+    - облачных провайдеров (OpenAI-совместимые API),
+    - локальных серверов (LM Studio / Ollama и т.п.), если они эмулируют этот API.
+
+    Контракт:
+    - `is_enabled()` сообщает, можно ли делать запросы (включено + есть api_base + model).
+    - `chat(prompt)` отправляет один промпт и возвращает текст ответа.
+      При любой проблеме (конфиг/сеть/ответ) бросает RuntimeError.
     """
 
     def __init__(
@@ -24,24 +29,28 @@ class LLMClient:
         model: Optional[str] = None,
         timeout_sec: Optional[int] = None,
     ) -> None:
+        # Важно: rstrip("/") чтобы не получить двойной слэш при сборке URL.
         self.api_base = (api_base or settings.llm_api_base or "").rstrip("/")
         self.api_key = api_key or settings.llm_api_key
         self.model = model or settings.llm_model
         self.timeout_sec = timeout_sec or settings.llm_timeout_sec
 
-    # отдельный флаг, чтобы DiagramAI мог понять, можно ли вообще ходить в LLM
     def is_enabled(self) -> bool:
-        return bool(
-            settings.llm_enabled
-            and self.api_base
-            and self.model
-        )
+        """
+        Возвращает True, если клиент в принципе готов ходить в LLM.
+
+        Используется внешним кодом (например DiagramAI), чтобы:
+        - не пытаться делать HTTP, если llm выключен;
+        - не ловить исключения там, где можно просто выбрать fallback.
+        """
+        return bool(settings.llm_enabled and self.api_base and self.model)
 
     def chat(self, prompt: str) -> str:
         """
-        Отправляет один промпт и возвращает текст ответа.
+        Отправляет один промпт в chat/completions и возвращает `message.content`.
 
-        Бросает RuntimeError при проблемах сети/формата ответа.
+        Ошибки:
+        - RuntimeError: LLM выключен/не настроен; сеть/таймаут; не-JSON; неожиданный формат ответа.
         """
         if not self.is_enabled():
             raise RuntimeError("LLM is disabled or not configured (llm_enabled/api_base/model).")
@@ -53,20 +62,18 @@ class LLMClient:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are an assistant that helps analyze and refactor UML class diagrams for Python projects.",
+                    "content": (
+                        "You are an assistant that helps analyze and refactor UML class diagrams for Python projects."
+                    ),
                 },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
+                {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
         }
 
         data = json.dumps(payload).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-        }
+
+        headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
@@ -74,13 +81,16 @@ class LLMClient:
 
         try:
             with urlrequest.urlopen(req, timeout=self.timeout_sec) as resp:
+                # Читаем ответ целиком. (Поведение как было: decode utf-8.)
                 resp_body = resp.read().decode("utf-8")
-        except urlerror.URLError as e:  # включает таймауты и прочие сетевые ошибки
+        except urlerror.URLError as e:
+            # URLError включает и таймауты, и ошибки соединения.
             raise RuntimeError(f"LLM HTTP error: {e}") from e
 
         try:
             parsed = json.loads(resp_body)
         except json.JSONDecodeError as e:
+            # Сохраняем прежний смысл: показать сырой ответ (repr), чтобы было что дебажить.
             raise RuntimeError(f"LLM returned non-JSON response: {resp_body!r}") from e
 
         try:

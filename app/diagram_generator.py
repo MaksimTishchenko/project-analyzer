@@ -2,12 +2,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple, Any
 
 from .models import ProjectModel
 from .llm_client import LLMClient
 
+
 def _short_class_name(raw: str) -> str:
+    """
+    Возвращает «короткое» имя класса из произвольной строки.
+
+    Зачем:
+    - В данных анализа встречаются fully-qualified имена (`pkg.mod.Class`);
+    - Также могут попадаться типы с generics/параметрами (`Class[T]`).
+
+    Правила:
+    - пустая/None строка -> пустая строка;
+    - отрезаем всё после `[` (generic/параметры типа);
+    - берём последний сегмент после `.` (короткое имя).
+    """
     name = (raw or "").strip()
     if not name:
         return ""
@@ -19,19 +32,36 @@ def _short_class_name(raw: str) -> str:
 
 
 def _is_public(name: str) -> bool:
+    """
+    Признак «публичности» по python-стилю именования.
+
+    Сейчас используется для фильтрации методов:
+    - публичные: не начинаются с `_`
+    - приватные/служебные: начинаются с `_`
+    """
     return bool(name) and not name.startswith("_")
 
 
 def _module_to_package_name(path_str: str) -> str:
+    """
+    Преобразует путь файла модуля в имя пакета (для PlantUML `package`).
+
+    Текущее поведение намеренно простое и стабильное:
+    - берём stem у пути (имя файла без расширения).
+    """
     return Path(path_str).stem
 
 
-def _class_score(cls) -> int:
+def _class_score(cls: Any) -> int:
     """
-    Heuristic importance score:
-    - methods
-    - bases
-    - compositions
+    Грубая эвристика важности класса для ограничения размера диаграммы (top-N).
+
+    Чем больше «структурных» связей, тем выше приоритет:
+    - количество методов (вес 2)
+    - количество базовых классов / наследование (вес 3)
+    - количество composition/aggregation связей (вес 3)
+
+    Важно: это *не* строгая метрика, а лишь способ выбрать наиболее заметные классы.
     """
     return (
         len(getattr(cls, "methods", [])) * 2
@@ -43,16 +73,20 @@ def _class_score(cls) -> int:
 @dataclass
 class DiagramGenerator:
     """
-    Generates PlantUML class diagrams from ProjectModel.
+    Генерирует PlantUML-диаграмму классов из `ProjectModel`.
 
-    NEW:
-    - max_classes: limit diagram size (top-N by importance)
+    Основные опции:
+    - public_only: показывать только публичные методы (не начинающиеся с `_`);
+    - group_by_module: группировать классы по модулям через PlantUML `package`;
+    - show_relations: добавлять наследование и композиции/агрегации;
+    - max_classes: ограничить размер диаграммы (top-N по эвристике важности).
+      Значение 0 означает «без ограничений».
     """
 
     public_only: bool = True
     group_by_module: bool = False
     show_relations: bool = True
-    max_classes: int = 0  # 0 = no limit
+    max_classes: int = 0  # 0 = без лимита
 
     def generate_class_diagram(
         self,
@@ -63,6 +97,14 @@ class DiagramGenerator:
         show_relations: Optional[bool] = None,
         max_classes: Optional[int] = None,
     ) -> str:
+        """
+        Собирает PlantUML-диаграмму классов для всего проекта.
+
+        Важное поведение:
+        - возвращает строку PlantUML, всегда включает `@startuml` и `@enduml`;
+        - если включён max_classes > 0, отбирает top-N наиболее «важных» классов;
+        - связи (inheritance/composition) рисуются только между *выбранными* классами.
+        """
         public_only = self.public_only if public_only is None else public_only
         group_by_module = self.group_by_module if group_by_module is None else group_by_module
         show_relations = self.show_relations if show_relations is None else show_relations
@@ -71,7 +113,7 @@ class DiagramGenerator:
         lines: List[str] = ["@startuml", ""]
 
         # --- collect classes ---
-        all_classes = []
+        all_classes: List[Tuple[Any, Any]] = []
         for module in project.modules:
             for cls in module.classes:
                 all_classes.append((module, cls))
@@ -83,18 +125,22 @@ class DiagramGenerator:
 
         selected_class_names: Set[str] = {cls.name for _, cls in all_classes}
 
-        def render_class(cls) -> None:
+        def render_class(cls: Any) -> None:
+            """
+            Рендерит один class-блок PlantUML (с методами, отфильтрованными по public_only).
+            """
             lines.append(f"class {cls.name} {{")
-            for method in cls.methods:
+            for method in getattr(cls, "methods", []):
                 if public_only and not _is_public(method.name):
                     continue
+                # Сохраняем прежний формат: "+ methodName()"
                 lines.append(f"    + {method.name}()")
             lines.append("}")
             lines.append("")
 
         # --- render classes ---
         if group_by_module:
-            by_module: dict[str, List] = {}
+            by_module: dict[str, List[Any]] = {}
             for module, cls in all_classes:
                 by_module.setdefault(str(module.path), []).append(cls)
 
@@ -113,13 +159,14 @@ class DiagramGenerator:
             lines.append("@enduml")
             return "\n".join(lines)
 
-        # --- inheritance ---
+        # --- inheritance (child --|> parent) ---
         inheritance: Set[Tuple[str, str]] = set()
         for _, cls in all_classes:
-            for base in cls.bases:
+            for base in getattr(cls, "bases", []):
                 parent = _short_class_name(base)
                 if not parent or parent == "object":
                     continue
+                # показываем только связи между классами, которые попали в текущую диаграмму
                 if parent not in selected_class_names:
                     continue
                 inheritance.add((cls.name, parent))
@@ -128,14 +175,17 @@ class DiagramGenerator:
             lines.append(f"{child} --|> {parent}")
 
         # --- composition / aggregation ---
+        # tuple: (owner, arrow, target, label)
         relations: Set[Tuple[str, str, str, str]] = set()
         for _, cls in all_classes:
-            for rel in cls.compositions:
+            for rel in getattr(cls, "compositions", []):
                 a = rel.owner or cls.name
                 b = _short_class_name(rel.target)
                 if a not in selected_class_names or b not in selected_class_names:
                     continue
-                arrow = "*--" if getattr(rel, "kind", "composition") == "composition" else "o--"
+
+                kind = getattr(rel, "kind", "composition")
+                arrow = "*--" if kind == "composition" else "o--"
                 label = rel.attribute or ""
                 relations.add((a, arrow, b, label))
 
@@ -152,11 +202,13 @@ class DiagramGenerator:
 
 class DiagramAI:
     """
-    Обёртка над DiagramGenerator, которая при желании прогоняет диаграмму через LLM.
+    Обёртка над DiagramGenerator, которая при желании улучшает диаграмму через LLM.
 
-    Поведение по умолчанию:
-    - если LLM выключен или не сконфигурирован -> просто возвращаем статическую диаграмму;
-    - если LLM включён, но во время запроса произошла ошибка -> тихо откатываемся к статике.
+    Гарантии поведения:
+    - Всегда строим baseline диаграмму статически (есть безопасный fallback).
+    - Если LLM выключен/не настроен -> возвращаем baseline.
+    - Если LLM вернул некорректный формат -> возвращаем baseline.
+    - Если в процессе запроса была ошибка -> возвращаем baseline.
     """
 
     def __init__(
@@ -171,39 +223,35 @@ class DiagramAI:
         """
         Генерирует PlantUML-диаграмму с учётом LLM.
 
-        1) Всегда строит baseline-диаграмму статически (чтобы было на что откатиться).
-        2) Если LLM выключен/не настроен -> сразу возвращает baseline.
-        3) Если LLM отвечает валидным PlantUML (@startuml/@enduml) -> возвращаем его.
-        4) Если что-то пошло не так -> возвращаем baseline.
+        Алгоритм:
+        1) Строим baseline диаграмму статически (без LLM).
+        2) Если LLM не активен -> возвращаем baseline.
+        3) Иначе отправляем baseline как вход и просим улучшить (с фильтрацией мусора/группировкой).
+        4) Возвращаем ответ LLM только если он содержит валидный блок PlantUML.
+        5) При любых проблемах возвращаем baseline.
         """
-        # Базовая диаграмма (как раньше)
         static_diagram = self._generator.generate_class_diagram(project)
 
-        # Если LLM не включен или не настроен — ничего не меняем
         if not self._client.is_enabled():
             return static_diagram
 
-        prompt = f"""
-Ты — помощник по анализу архитектуры Python-проектов.
-
-Ниже дана PlantUML-диаграмма классов, сгенерированная статическим анализом AST.
-Твоя задача — сделать её более аккуратной и обзорной:
-
-1. Удали второстепенные или технические классы (tests, utils, internal и т.п.), если они не критичны для архитектуры.
-2. Сгруппируй классы по смысловым подсистемам через package, если это уместно.
-3. Сохрани только самые важные связи наследования и композиции.
-4. СТРОГО сохрани синтаксис PlantUML.
-
-Важные требования:
-- Не добавляй никакого текста/комментариев вне блока диаграммы.
-- Обязательно оставь строки @startuml и @enduml.
-- Выведи только итоговый PlantUML, без пояснений.
-
-Вот исходная диаграмма:
-```plantuml
-{static_diagram}
-```
-""".strip()
+        prompt = (
+            "Ты — помощник по анализу архитектуры Python-проектов.\n\n"
+            "Ниже дана PlantUML-диаграмма классов, сгенерированная статическим анализом AST.\n"
+            "Твоя задача — сделать её более аккуратной и обзорной:\n\n"
+            "1. Удали второстепенные или технические классы (tests, utils, internal и т.п.), если они не критичны для архитектуры.\n"
+            "2. Сгруппируй классы по смысловым подсистемам через package, если это уместно.\n"
+            "3. Сохрани только самые важные связи наследования и композиции.\n"
+            "4. СТРОГО сохрани синтаксис PlantUML.\n\n"
+            "Важные требования:\n"
+            "- Не добавляй никакого текста/комментариев вне блока диаграммы.\n"
+            "- Обязательно оставь строки @startuml и @enduml.\n"
+            "- Выведи только итоговый PlantUML, без пояснений.\n\n"
+            "Вот исходная диаграмма:\n"
+            "```plantuml\n"
+            f"{static_diagram}\n"
+            "```\n"
+        ).strip()
 
         try:
             result = self._client.chat(prompt)
@@ -212,19 +260,19 @@ class DiagramAI:
 
         text = (result or "").strip()
 
-        # Модель часто оборачивает ответ в ```plantuml ... ```
+        # Модель часто оборачивает ответ в fenced code block: ```plantuml ... ```
         if "```" in text:
-            # вытаскиваем внутренности fenced-кода
             parts = text.split("```")
             if len(parts) >= 3:
-                text = parts[1]
-                # может быть "plantuml\n@startuml..."
-                if "\n" in text:
-                    first_line, rest = text.split("\n", 1)
+                candidate = parts[1]
+                # иногда первым идёт язык блока: "plantuml\n..."
+                if "\n" in candidate:
+                    first_line, rest = candidate.split("\n", 1)
                     if first_line.strip().lower() in {"plantuml", "puml"}:
-                        text = rest
-                text = text.strip()
+                        candidate = rest
+                text = candidate.strip()
 
+        # Минимальная валидация: должны быть маркеры начала/конца диаграммы
         if "@startuml" in text and "@enduml" in text:
             return text
 

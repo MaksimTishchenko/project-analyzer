@@ -1,4 +1,5 @@
-# tests/test_diagram_generator.py
+from __future__ import annotations
+
 from pathlib import Path
 
 from app.diagram_generator import DiagramGenerator
@@ -6,8 +7,13 @@ from app.models import ClassInfo, CompositionInfo, FunctionInfo, ModuleInfo, Pro
 
 
 def test_diagram_generator_renders_composition_and_aggregation() -> None:
-    from pathlib import Path
+    """
+    Генератор должен отличать:
+    - composition:  *--
+    - aggregation: o--
 
+    И добавлять подпись атрибута в кавычках (как ожидает PlantUML).
+    """
     a = ClassInfo(name="A", bases=[], methods=[], lineno=1)
     b = ClassInfo(name="B", bases=[], methods=[], lineno=2)
     c = ClassInfo(name="C", bases=[], methods=[], lineno=3)
@@ -28,8 +34,11 @@ def test_diagram_generator_renders_composition_and_aggregation() -> None:
 
 
 def test_diagram_generator_shows_only_public_methods_by_default() -> None:
-    from pathlib import Path
-
+    """
+    По умолчанию генератор должен показывать только публичные методы:
+    - `pub` остаётся
+    - `_priv` и `__dunder__` не попадают в диаграмму
+    """
     a = ClassInfo(
         name="A",
         bases=[],
@@ -53,31 +62,27 @@ def test_diagram_generator_shows_only_public_methods_by_default() -> None:
 
 
 def test_diagram_generator_produces_valid_plantuml() -> None:
+    """
+    Smoke-test: диаграмма должна быть валидным PlantUML-документом и содержать:
+    - @startuml / @enduml
+    - классы
+    - наследование: Child --|> Base
+    """
     base = ClassInfo(
         name="Base",
         bases=[],
-        methods=[
-            FunctionInfo(name="run", lineno=1, decorators=[]),
-        ],
+        methods=[FunctionInfo(name="run", lineno=1, decorators=[])],
         lineno=1,
     )
 
     child = ClassInfo(
         name="Child",
         bases=["Base"],
-        methods=[
-            FunctionInfo(name="do_something", lineno=5, decorators=[]),
-        ],
+        methods=[FunctionInfo(name="do_something", lineno=5, decorators=[])],
         lineno=5,
     )
 
-    module = ModuleInfo(
-        path=Path("module.py"),
-        classes=[base, child],
-        functions=[],
-        imports=[],
-    )
-
+    module = ModuleInfo(path=Path("module.py"), classes=[base, child], functions=[], imports=[])
     project = ProjectModel(modules=[module])
 
     generator = DiagramGenerator()
